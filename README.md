@@ -142,7 +142,7 @@ Creating data JSON for val split 1...
 Creating data JSON for test split 1...
 ```
 
-### Step 3: Model Pre-training (TESTING)
+### Step 3: Model Pre-training (Implemented)
 Train the model using RSTnet training scripts:
 ```bash
 cd RSTnet/MLLM_v2/egs/pretraining
@@ -152,11 +152,11 @@ bash ./run_memory_optimized.sh #Tested on my 24GB vram on my RTX 3090
 bash ./run.sh #I can't run this on my GPU
 ```
 
-### Step 4: Inference (Planned)
+### Step 4: Inference (TESTING/BROKEN)
 Run inference using the trained model:
 ```bash
-cd RSTnet/MLLM_v2/egs/pretraining
-bash ./infer.sh
+cd espeak_speech_ai
+./direct_inference.py --text "This is a test of the speech system."
 ```
 
 ## Troubleshooting
