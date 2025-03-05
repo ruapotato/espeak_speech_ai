@@ -5,6 +5,7 @@ from typing import Any, Literal, Optional, Type, Union
 import torch
 import yaml
 from typing_extensions import Self
+import inspect
 
 @dataclass
 class Config:
@@ -42,6 +43,8 @@ class Config:
     n_expert_per_token: int = 0
     attention_logit_softcapping: Optional[float] = None
     final_logit_softcapping: Optional[float] = None
+    # Added for unknown parameters storage
+    _extras: dict = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.name:
@@ -103,8 +106,31 @@ class Config:
             file_kwargs = yaml.safe_load(fp)
             if file_kwargs is None:
                 raise ValueError(f"{path} is empty which is likely unexpected.")
+        
+        # Handle unknown parameters by storing them in _extras
         file_kwargs.update(kwargs)
-        return cls(**file_kwargs)
+        
+        # Get all field names from the dataclass
+        field_names = {f.name for f in fields(cls) if f.name != "_extras"}
+        
+        # Separate known and unknown parameters
+        known_kwargs = {}
+        unknown_kwargs = {}
+        
+        for k, v in file_kwargs.items():
+            if k in field_names:
+                known_kwargs[k] = v
+            else:
+                unknown_kwargs[k] = v
+                print(f"Warning: Unknown parameter '{k}' in config file will be stored in _extras")
+        
+        # Create the instance with known parameters
+        instance = cls(**known_kwargs)
+        
+        # Store unknown parameters in _extras
+        instance._extras = unknown_kwargs
+        
+        return instance
 
     @classmethod
     def from_checkpoint(cls, path: Path, **kwargs: Any) -> Self:
@@ -132,3 +158,11 @@ class Config:
             return partial(RMSNorm, add_unit_offset="Gemma" in self.name)
         return getattr(torch.nn, self.norm_class_name)
 
+# Define the missing function that's used in the code
+def find_multiple(n: int, divisor: int) -> int:
+    if n % divisor == 0:
+        return n
+    return n + (divisor - n % divisor)
+
+# Add this import at the top of the file
+from dataclasses import fields

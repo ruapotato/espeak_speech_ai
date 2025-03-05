@@ -142,11 +142,14 @@ Creating data JSON for val split 1...
 Creating data JSON for test split 1...
 ```
 
-### Step 3: Model Pre-training (Planned)
+### Step 3: Model Pre-training (TESTING)
 Train the model using RSTnet training scripts:
 ```bash
 cd RSTnet/MLLM_v2/egs/pretraining
-bash ./run.sh
+# For training on about 15 GB vram
+bash ./run_memory_optimized.sh #Tested on my 24GB vram on my RTX 3090
+# For training on whatever this take > 24GB vram (Much more ideal)
+bash ./run.sh #I can't run this on my GPU
 ```
 
 ### Step 4: Inference (Planned)

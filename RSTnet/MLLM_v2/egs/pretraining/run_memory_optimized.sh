@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# eSpeak Speech AI Training Script
+# eSpeak Speech AI Training Script - Memory Optimized for 24GB VRAM
 # Based on RSTnet with modifications for eSpeak synthetic speech datasets
 
 # Set the stages to execute (modify as needed)
@@ -17,7 +17,7 @@ test_set="test"
 export DATA_ROOT=~/espeak_speech_ai/gutenberg_espeak_dataset_clean
 export LLM_CHECKPOINT=~/espeak_speech_ai/checkpoints/meta-llama/Llama-3.2-1B-Instruct
 export MODEL_DIR=~/espeak_speech_ai/checkpoints/espeak_speech_ai
-export EXPERIMENT_NAME="espeak_llama32_1b"
+export EXPERIMENT_NAME="espeak_llama32_1b_memory_optimized"
 
 # Create experiment directory
 mkdir -p $MODEL_DIR/$EXPERIMENT_NAME
@@ -25,16 +25,16 @@ mkdir -p $MODEL_DIR/$EXPERIMENT_NAME
 # Update PYTHONPATH to include the necessary directories
 export PYTHONPATH=$PYTHONPATH:$HOME/espeak_speech_ai/RSTnet:$HOME/espeak_speech_ai/RSTnet/MLLM_v2
 
-# Training configuration
+# Training configuration - Memory optimized
 seed=999
-batch_scale=2000
-learning_rate=0.0001
-tag="espeak_pretraining"
+batch_scale=500    # Reduced from 2500 to save memory
+learning_rate=0.0002
+tag="espeak_memory_optimized"
 
 # Output directories
 mkdir -p $MODEL_DIR/$EXPERIMENT_NAME/log
 
-echo "Running eSpeak Speech AI training with stages $stage to $stop_stage"
+echo "Running memory-optimized eSpeak Speech AI training with stages $stage to $stop_stage"
 
 # Stage 1: Check if data preparation is complete
 if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
@@ -196,13 +196,13 @@ if [ ${stage} -le 6 ] && [ ${stop_stage} -ge 6 ]; then
     fi
 fi
 
-# Stage 7: Start training
+# Stage 7: Start training with memory optimizations
 if [ ${stage} -le 7 ] && [ ${stop_stage} -ge 7 ]; then
-    echo "Stage 7: Starting model training..."
+    echo "Stage 7: Starting model training with memory optimizations..."
     
     # Load JSON paths
-    train_data_jsons=$(cat $MODEL_DIR/$EXPERIMENT_NAME/train_jsons.txt)
-    valid_data_jsons=$(cat $MODEL_DIR/$EXPERIMENT_NAME/valid_jsons.txt)
+    train_data_jsons=$(cat $MODEL_DIR/$EXPERIMENT_NAME/train_jsons.txt || echo "$DATA_ROOT/$train_set/${ngpu}splits_2/data.1.json")
+    valid_data_jsons=$(cat $MODEL_DIR/$EXPERIMENT_NAME/valid_jsons.txt || echo "$DATA_ROOT/$valid_set/${ngpu}splits_2/data.1.json")
     
     if [ -z "$train_data_jsons" ] || [ -z "$valid_data_jsons" ]; then
         echo "ERROR: Training or validation JSON paths are empty!"
@@ -217,45 +217,64 @@ if [ ${stage} -le 7 ] && [ ${stop_stage} -ge 7 ]; then
     export INDEX=0
     export CHIEF_IP="localhost"
     
+    # Memory optimization environment variables
+    export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    
+    # Set smaller dimensions for CodecFormer to save memory
+    codecformer_dim=768        # Reduced from 1024
+    codecformer_layers=4       # Reduced from 6
+    codecformer_heads=12       # Reduced from 16
+    
+    # Enable gradient checkpointing to save memory
+    use_gradient_checkpointing=""
+    
+    # Use smaller training length
+    max_length=512             # Reduced from 1000
+    
     # Log start of training
-    echo "Starting training with $ngpu GPUs..."
+    echo "Starting memory-optimized training with $ngpu GPUs..."
     echo "Training data: $train_data_jsons"
     echo "Validation data: $valid_data_jsons"
     echo "Experiment directory: $MODEL_DIR/$EXPERIMENT_NAME"
+    echo "Memory optimizations: Using batch_scale=$batch_scale, codecformer_dim=$codecformer_dim, gradient checkpointing"
     
     # Launch distributed training (using LoRA for efficiency)
-    # Modify parameters as needed for your specific setup
     python -m torch.distributed.run \
             --nproc_per_node=$HOST_GPU_NUM \
             --nnodes=$HOST_NUM \
             --master_addr=$CHIEF_IP \
             --master_port=29500 \
             --node_rank=$INDEX \
-            $TRAINER_DIR/pre_training_lora.py \
+            $HOME/espeak_speech_ai/RSTnet/MLLM_v2/trainer/pre_training_lora.py \
             --train_data_jsons $train_data_jsons \
             --valid_data_jsons $valid_data_jsons \
             --exp_dir $MODEL_DIR/$EXPERIMENT_NAME \
-            --n_epoch 100 \
-            --max_length 1000 \
-            --batch_scale 2500 \
-            --global_learning_rate 1e-3 \
-            --local_learning_rate 2e-4 \
+            --n_epoch 15 \
+            --max_length $max_length \
+            --batch_scale $batch_scale \
+            --global_learning_rate 5e-4 \
+            --local_learning_rate 1e-4 \
             --model_config $LLM_CHECKPOINT/model_config.yaml \
             --audio_card 2050 \
             --n_q 8 \
             --dep_q 8 \
-            --codecformer_heads 16 \
-            --codecformer_layers 6 \
+            --codecformer_heads $codecformer_heads \
+            --codecformer_layers $codecformer_layers \
+            --codecformer_dim $codecformer_dim \
+            --codecformer_dim_feedforward 2304 \
             --checkpoint_path $LLM_CHECKPOINT/lit_model.pth \
-            --lora_r 32 \
+            --lora_r 16 \
             --lora_alpha 16 \
+            --lora_dropout 0.1 \
             --lora_query true \
             --lora_key true \
             --lora_value true \
             --lora_projection true \
             --lora_mlp true \
             --lora_head true \
-            --save_interval 5000
+            --save_interval 5000 \
+            $use_gradient_checkpointing \
+            2>&1 | tee $MODEL_DIR/$EXPERIMENT_NAME/log/training.log
     
     echo "Training complete or terminated. Check logs in $MODEL_DIR/$EXPERIMENT_NAME for details."
 fi

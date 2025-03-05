@@ -4,19 +4,19 @@
 # This script sets up the data processing pipeline for the RSTnet speech-text foundation model
 
 # Set key variables
-export DATA_ROOT=~/mist_speech/gutenberg_espeak_dataset_clean
-export LLM_CHECKPOINT=~/mist_speech/checkpoints/meta-llama/Llama-3.2-1B-Instruct
+export DATA_ROOT=~/espeak_speech_ai/gutenberg_espeak_dataset_clean
+export LLM_CHECKPOINT=~/espeak_speech_ai/checkpoints/meta-llama/Llama-3.2-1B-Instruct
 export EXPERIMENT_NAME="gutenberg_llama32_1b"
 export NGPU=1  # Adjust based on available GPUs
 
 # Update PYTHONPATH to include the necessary directories
-export PYTHONPATH=$PYTHONPATH:$HOME/mist_speech/RSTnet:$HOME/mist_speech/RSTnet/MLLM_v2:$HOME/mist_speech/RSTnet/MLLM_v2/tools:$HOME/mist_speech/RSTnet/MLLM_v2/egs/pretraining
+export PYTHONPATH=$PYTHONPATH:$HOME/espeak_speech_ai/RSTnet:$HOME/espeak_speech_ai/RSTnet/MLLM_v2:$HOME/espeak_speech_ai/RSTnet/MLLM_v2/tools:$HOME/espeak_speech_ai/RSTnet/MLLM_v2/egs/pretraining
 echo "PYTHONPATH set to: $PYTHONPATH"
 
 # Define correct paths to the required scripts
-OFFLINE_CODEC_PATH="$HOME/mist_speech/RSTnet/MLLM_v2/egs/pretraining/local/offline_codec_tokenization_fixed.py"
-TEXT_TOKENIZATION_PATH="$HOME/mist_speech/RSTnet/MLLM_v2/egs/pretraining/data_scripts/text_tokenization_scp.py"
-CREATE_DATA_JSON_PATH="$HOME/mist_speech/RSTnet/MLLM_v2/egs/pretraining/data_scripts/create_data_json.py"
+OFFLINE_CODEC_PATH="$HOME/espeak_speech_ai/RSTnet/MLLM_v2/egs/pretraining/local/offline_codec_tokenization_fixed.py"
+TEXT_TOKENIZATION_PATH="$HOME/espeak_speech_ai/RSTnet/MLLM_v2/egs/pretraining/data_scripts/text_tokenization_scp.py"
+CREATE_DATA_JSON_PATH="$HOME/espeak_speech_ai/RSTnet/MLLM_v2/egs/pretraining/data_scripts/create_data_json.py"
 
 # Check if the required scripts exist
 if [ ! -f "$OFFLINE_CODEC_PATH" ]; then
@@ -35,8 +35,8 @@ if [ ! -f "$CREATE_DATA_JSON_PATH" ]; then
 fi
 
 # Create a symbolic link for tools and utils if they don't exist in the expected location
-ln -sf $HOME/mist_speech/RSTnet/MLLM_v2/tools $HOME/mist_speech/RSTnet/MLLM_v2/egs/pretraining/tools
-ln -sf $HOME/mist_speech/RSTnet/MLLM_v2/utils $HOME/mist_speech/RSTnet/MLLM_v2/egs/pretraining/utils
+ln -sf $HOME/espeak_speech_ai/RSTnet/MLLM_v2/tools $HOME/espeak_speech_ai/RSTnet/MLLM_v2/egs/pretraining/tools
+ln -sf $HOME/espeak_speech_ai/RSTnet/MLLM_v2/utils $HOME/espeak_speech_ai/RSTnet/MLLM_v2/egs/pretraining/utils
 echo "Created symbolic links for tools and utils"
 
 # Step 1: Create necessary directories
@@ -52,11 +52,11 @@ import os
 import glob
 
 # Load metadata
-with open(os.path.expanduser('~/mist_speech/gutenberg_espeak_dataset_clean/metadata.json'), 'r') as f:
+with open(os.path.expanduser('~/espeak_speech_ai/gutenberg_espeak_dataset_clean/metadata.json'), 'r') as f:
     metadata = json.load(f)
 
 # Create tar.scp files for train, val, test
-data_root = os.path.expanduser('~/mist_speech/gutenberg_espeak_dataset_clean')
+data_root = os.path.expanduser('~/espeak_speech_ai/gutenberg_espeak_dataset_clean')
 for split in ['train', 'val', 'test']:
     # Get all files in this split
     split_data = metadata.get(split, [])
@@ -86,7 +86,7 @@ for part in train val test; do
         done
         
         # Check if utils/split_scp.pl exists in RSTnet
-        SPLIT_SCP_PATH=$(find $HOME/mist_speech/RSTnet/ -name "split_scp.pl" | head -1)
+        SPLIT_SCP_PATH=$(find $HOME/espeak_speech_ai/RSTnet/ -name "split_scp.pl" | head -1)
         if [ ! -z "$SPLIT_SCP_PATH" ]; then
             perl $SPLIT_SCP_PATH $DATA_ROOT/${part}/tar.scp.shuf $split_scp
         else
@@ -187,7 +187,7 @@ for part in train val test; do
             echo "Processing audio codec tokenization for $part split $n using MimiCodec..."
             
             # Change to the correct directory
-            cd $HOME/mist_speech/RSTnet/MLLM_v2/egs/pretraining
+            cd $HOME/espeak_speech_ai/RSTnet/MLLM_v2/egs/pretraining
             
             # Use MimiCodec tokenizer instead of SSL tokenizer
             python3 $OFFLINE_CODEC_PATH \
@@ -211,7 +211,7 @@ for part in train val test; do
             echo "Processing text tokenization for $part split $n..."
             
             # Change to the correct directory
-            cd $HOME/mist_speech/RSTnet/MLLM_v2/egs/pretraining
+            cd $HOME/espeak_speech_ai/RSTnet/MLLM_v2/egs/pretraining
             
             python3 $TEXT_TOKENIZATION_PATH \
                 --rank $n \
@@ -232,7 +232,7 @@ for part in train val test; do
             echo "Creating data JSON for $part split $((n+1))..."
             
             # Change to the correct directory
-            cd $HOME/mist_speech/RSTnet/MLLM_v2/egs/pretraining
+            cd $HOME/espeak_speech_ai/RSTnet/MLLM_v2/egs/pretraining
             
             python3 $CREATE_DATA_JSON_PATH \
               --task setence_level_text_audio_interleaved \
