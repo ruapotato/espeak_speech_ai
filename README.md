@@ -156,7 +156,12 @@ bash ./run.sh #I can't run this on my GPU
 Run inference using the trained model:
 ```bash
 cd espeak_speech_ai
-./direct_inference.py --text "This is a test of the speech system."
+python direct_inference.py \
+  --resume ~/espeak_speech_ai/checkpoints/espeak_speech_ai/espeak_llama32_1b_memory_optimized/ep30.checkpoint \
+  --exp_dir ~/espeak_speech_ai/checkpoints/espeak_speech_ai/espeak_llama32_1b_memory_optimized \
+  --text "This is a test of the eSpeak Speech AI system." \
+  --output_dir ./outputs \
+  --debug_mode
 ```
 
 ## Troubleshooting

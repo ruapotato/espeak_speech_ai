@@ -184,8 +184,7 @@ def main():
         checkpoint_path = args.exp_dir + f"/ep{ep}.checkpoint"
         logging.info(f"Saving checkpoint file {checkpoint_path}")
         #save_model(checkpoint_path, model)
-        if ep > 100:
-            save_checkpoint(checkpoint_path, model, optimizer, scheduler, reporter)
+        save_checkpoint(checkpoint_path, model, optimizer, scheduler, reporter)
 
 def train_one_epoch(args, model, train_dl, optimizer, scheduler, reporter, parent_reporter):
     model = model.train()

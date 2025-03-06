@@ -272,7 +272,7 @@ if [ ${stage} -le 7 ] && [ ${stop_stage} -ge 7 ]; then
             --lora_projection true \
             --lora_mlp true \
             --lora_head true \
-            --save_interval 5000 \
+            --save_interval 1000 \
             $use_gradient_checkpointing \
             2>&1 | tee $MODEL_DIR/$EXPERIMENT_NAME/log/training.log
     
