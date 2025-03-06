@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-''' 
-Modified inference code for eSpeak Speech AI
-Based on original RSTnet infer_no_streaming.py with fixes for tensor dimension issues
+'''
+Final solution for eSpeak Speech AI
+Using reverse delay approach with tuned temperature settings
 '''
 import os
 import sys
@@ -10,6 +10,7 @@ import argparse
 import yaml
 import torch
 import torchaudio
+import numpy as np
 from pathlib import Path
 
 # Add RSTnet paths to Python path
@@ -42,8 +43,8 @@ def get_parser():
     parser.add_argument('--inference_mode', type=str, default='sampling', 
                          choices=['sampling', 'greedy', 'teacher-force'],
                          help='Inference mode')
-    parser.add_argument('--temp', type=float, default=0.8, 
-                        help='Softmax temperature for audio generation')
+    parser.add_argument('--temp', type=float, default=0.5, 
+                        help='Softmax temperature for audio generation (lower = more deterministic)')
     parser.add_argument('--temp_text', type=float, default=0.7, 
                         help='Softmax temperature for text generation')
     parser.add_argument('--topk', type=int, default=30, 
@@ -72,6 +73,8 @@ def get_parser():
     parser.add_argument('--generate_target', type=str, default="audio", 
                         choices=['audio', 'text'],
                         help="Type of output to generate")
+    parser.add_argument('--debug_mode', action='store_true',
+                        help="Enable debug logging and token visualization")
     
     return parser
 
@@ -175,9 +178,27 @@ def load_model(args):
     # Initialize audio tokenizer
     logger.info("Initializing audio tokenizer...")
     audio_tokenizer = MimiTokenizer(device=device)
-    audio_tokenizer = audio_tokenizer.to(device)
+    logger.info("Audio tokenizer initialized with default settings")
     
     return model, audio_tokenizer, device, train_args, llm_tokenizer
+
+def inspect_audio_tokens(tokens, label=""):
+    """Debug utility to inspect audio token statistics"""
+    if tokens is None:
+        logger.debug(f"{label} tokens: None")
+        return
+        
+    try:
+        if isinstance(tokens, torch.Tensor):
+            min_val = tokens.min().item()
+            max_val = tokens.max().item()
+            mean_val = tokens.float().mean().item()
+            shape = tokens.shape
+            logger.debug(f"{label} tokens: shape={shape}, min={min_val}, max={max_val}, mean={mean_val:.2f}")
+        else:
+            logger.debug(f"{label} tokens: {type(tokens)}")
+    except Exception as e:
+        logger.debug(f"Error inspecting {label} tokens: {e}")
 
 def create_input_sequence(text, device, llm_tokenizer=None, text_empty_token=128002, semantic_pad_token=2049):
     """
@@ -261,8 +282,8 @@ def prepare_for_inference(seq, mask, task_name):
         return_mask = mask.clone()
         
         # Set max and min generation lengths
-        maxlen = 100  # Limit max length for safety
-        minlen = 30   # Ensure reasonable min length
+        maxlen = min(150, prefix_len * 3)  # Increased for longer audio
+        minlen = min(50, prefix_len)       # Increased for more stable output
         
         # We don't have ground truth audio for generation
         gt_audio = None
@@ -310,107 +331,70 @@ def prepare_for_inference(seq, mask, task_name):
     
     return prefix, mask, maxlen, minlen, gt_audio
 
-def reverse_delay(x):
-    """Reverse one step delay (from original code)"""
-    if x.shape[0] != 8:
-        x = x.transpose(0, 1)
+def apply_reverse_delay(tokens):
+    """Apply a reverse delay to token streams 1-7 (proven to work in experiments)"""
+    # Make a deep copy first
+    result = tokens.clone()
     
-    x_new = torch.ones_like(x)
-    x_new[0, :-1] = x[0, :-1]
-    x_new[1:, :-1] = x[1:, 1:]
+    # Make sure we're working with [seq_len, 8] format for easier processing
+    need_transpose = False
+    if result.dim() == 2 and result.shape[0] == 8 and result.shape[1] > 8:
+        result = result.transpose(0, 1)
+        need_transpose = True
     
-    return x_new[:, :-1]
+    # Apply reverse delay
+    seq_len = result.shape[0]
+    if seq_len > 1:
+        for i in range(1, 8):  # Channels 1-7
+            # Shift each channel backward by 1 position
+            temp = result[1:, i].clone()
+            result[:-1, i] = temp
+            # Pad the last position
+            result[-1, i] = 2049  # Pad token
+    
+    # Transpose back if needed
+    if need_transpose:
+        result = result.transpose(0, 1)
+    
+    return result
 
-def validate_audio_tokens(tokens, valid_range=(0, 2048)):
+def visualize_tokens_as_image(tokens, output_file="token_visualization.png"):
     """
-    Validates audio tokens to ensure they're within the expected range for MimiCodec
+    Visualizes the token sequence as a 2D image to help debug token patterns.
     
     Args:
-        tokens: Tensor of audio tokens
-        valid_range: Tuple of (min_value, max_value) for valid token range
-        
-    Returns:
-        Validated tensor with all tokens in valid range
-    """
-    min_val, max_val = valid_range
-    
-    # Check if any tokens are out of valid range
-    invalid_tokens = (tokens < min_val) | (tokens >= max_val)
-    
-    if invalid_tokens.any():
-        logger.warning(f"Found {invalid_tokens.sum().item()} invalid audio tokens. Clipping to valid range.")
-        # Clip values to valid range
-        tokens = torch.clamp(tokens, min_val, max_val - 1)
-        
-    return tokens
-
-def safe_detokenize(tokenizer, tokens, max_audio_length=100000):
-    """
-    Safely detokenize audio tokens with dimension checks and error handling
-    
-    Args:
-        tokenizer: The MimiCodec tokenizer
-        tokens: Audio tokens tensor
-        max_audio_length: Maximum allowed audio length to prevent CUDA errors
-        
-    Returns:
-        Detokenized audio waveform or None if detokenization fails
+        tokens: Token tensor of shape [seq_len, 8] or [8, seq_len]
+        output_file: File to save the visualization to
     """
     try:
-        # Ensure the tokens are within valid range
-        tokens = validate_audio_tokens(tokens)
+        import matplotlib.pyplot as plt
+        import numpy as np
         
-        # Inspect the tokens structure
-        logger.info(f"Detokenizing tokens with shape: {tokens.shape}")
+        # Make sure tokens are on CPU and convert to numpy
+        if isinstance(tokens, torch.Tensor):
+            tokens = tokens.detach().cpu().numpy()
         
-        # Check if tokens need to be transposed
-        if tokens.dim() == 2 and tokens.shape[0] == 8:
-            # Already in expected format: [num_streams, seq_len]
-            pass
-        elif tokens.dim() == 2 and tokens.shape[1] == 8:
-            # Transpose to expected format
-            tokens = tokens.transpose(0, 1)
-            logger.info(f"Transposed tokens to shape: {tokens.shape}")
-        
-        # Limit the sequence length to prevent OOM or indexing errors
-        if tokens.shape[1] > max_audio_length:
-            logger.warning(f"Truncating long audio sequence from {tokens.shape[1]} to {max_audio_length}")
-            tokens = tokens[:, :max_audio_length]
-        
-        # Move to CPU to avoid CUDA issues if needed
-        try:
-            # Try on current device first
-            audio = tokenizer.detokenize(tokens)
-        except RuntimeError as e:
-            if "CUDA" in str(e):
-                # Try on CPU as fallback
-                logger.warning("CUDA error in detokenization. Falling back to CPU...")
-                cpu_tokens = tokens.detach().cpu()
-                audio = tokenizer.cpu().detokenize(cpu_tokens)
-                tokenizer.to(tokens.device)  # Move tokenizer back
-            else:
-                raise
-                
-        return audio
-    
+        # Make sure shape is [seq_len, 8]
+        if tokens.shape[0] == 8 and tokens.shape[1] > 8:
+            tokens = tokens.T
+            
+        # Create figure
+        plt.figure(figsize=(10, 6))
+        plt.imshow(tokens, aspect='auto', cmap='viridis')
+        plt.colorbar(label='Token ID')
+        plt.xlabel('Channel')
+        plt.ylabel('Frame')
+        plt.title('Audio Token Visualization')
+        plt.tight_layout()
+        plt.savefig(output_file)
+        logger.info(f"Token visualization saved to {output_file}")
     except Exception as e:
-        logger.error(f"Error during detokenization: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        # Return a simple beep tone as fallback
-        logger.warning("Generating fallback audio tone")
-        sample_rate = 24000
-        duration = 1.0  # seconds
-        t = torch.arange(0, duration, 1.0/sample_rate)
-        # Generate a 440 Hz sine wave
-        audio = 0.5 * torch.sin(2 * torch.pi * 440 * t).unsqueeze(0)
-        return audio
+        logger.warning(f"Could not visualize tokens: {e}")
 
 def generate_speech(model, audio_tokenizer, input_seq, input_mask, task_name, args):
     """
     Generate speech from input sequence
-    Modified from the original InferenceImp.__call__ method with tensor dimension fixes
+    Using the reverse_delay approach that was proven to work in experiments
     """
     device = input_seq.device
     
@@ -444,18 +428,22 @@ def generate_speech(model, audio_tokenizer, input_seq, input_mask, task_name, ar
     logger.info(f"Generation parameters: maxlen={maxlen}, minlen={minlen}")
     
     try:
+        # Set model to evaluation mode
+        model.eval()
+        
         # Generation loop
         for g_idx in range(maxlen):
             print(".", end="", flush=True)
             g_len = prefix.shape[2]
             
             # Global inference step
-            init_token = model._get_initial_token()
-            init_token = init_token.expand(prefix.shape[0], -1, -1)
-            global_prefix = torch.cat([init_token, prefix], dim=-1)
-            
-            try:
-                # Forward pass through transformer - this is where most errors occur
+            with torch.no_grad():
+                # Get initial token
+                init_token = model._get_initial_token()
+                init_token = init_token.expand(prefix.shape[0], -1, -1)
+                global_prefix = torch.cat([init_token, prefix], dim=-1)
+                
+                # Forward pass through transformer
                 transformer_out, text_logits = model.forward_global(global_prefix)
                 
                 # Add padding for next token
@@ -478,142 +466,96 @@ def generate_speech(model, audio_tokenizer, input_seq, input_mask, task_name, ar
                 for l_idx in range(8):
                     # Get text embeddings
                     text_indices = prefix[:, 0, :]
+                    local_start_token = model.codecformer_text_emb(text_indices)
                     
-                    try:
-                        # FIX: Add try/except to handle tensor dimension mismatches
-                        local_start_token = model.codecformer_text_emb(text_indices)
-                        local_start_shape = local_start_token.shape
+                    # Forward pass through local model
+                    sequence = prefix[:, 1:, :]
+                    logits = model.forward_local(
+                        local_start_token=local_start_token, 
+                        sequence=sequence, 
+                        transformer_out=transformer_out
+                    )
+                    
+                    # Get logits for current channel
+                    valid_logits = logits[:, -1:, l_idx:l_idx+1, :]
+                    
+                    # Sample audio token with adjusted temperature based on channel
+                    # Use lower temperature for more stable generation
+                    current_temp = temp if l_idx > 0 else temp * 0.9  # Slightly lower temp for first channel
+                    
+                    if g_len == pre_gen_len:
+                        # First frame
+                        next_token = sample_token_audio(
+                            valid_logits.float(),
+                            use_sampling,
+                            current_temp,
+                            top_k,
+                        )
+                    elif l_idx > 0 and g_len > minlen:
+                        # Middle frames
+                        next_token = sample_token_audio(
+                            valid_logits.float(),
+                            use_sampling,
+                            current_temp,
+                            top_k,
+                        )
+                    else:
+                        # Special case
+                        next_token = sample_token_audio_2048(
+                            valid_logits.float(),
+                            use_sampling,
+                            current_temp,
+                            top_k
+                        )
                         
-                        # Debugging info
-                        if g_idx == 0 and l_idx == 0:
-                            logger.info(f"Context shapes - prefix: {prefix.shape}, text: {text_indices.shape}, emb: {local_start_shape}")
-                            
-                        # FIX: Handle tensor dimension issues
-                        # The sequence passed to forward_local has shape issues
-                        sequence = prefix[:, 1:, :]
-                        try:
-                            # Try with original implementation
-                            logits = model.forward_local(
-                                local_start_token=local_start_token, 
-                                sequence=sequence, 
-                                transformer_out=transformer_out
-                            )
-                        except RuntimeError as e:
-                            if "size of tensor a" in str(e) and "must match" in str(e):
-                                # FIX: Handle dimension mismatch
-                                expected_dim = int(str(e).split("(")[1].split(")")[0])
-                                current_dim = local_start_token.shape[0]
-                                
-                                # Adjust dimensions to match
-                                if expected_dim > current_dim:
-                                    # Expand to match
-                                    local_start_token = local_start_token.expand(expected_dim, -1)
-                                elif expected_dim < current_dim:
-                                    # Slice to match
-                                    local_start_token = local_start_token[:expected_dim]
-                                
-                                # Try again with adjusted dimensions
-                                logits = model.forward_local(
-                                    local_start_token=local_start_token, 
-                                    sequence=sequence, 
-                                    transformer_out=transformer_out
-                                )
-                            else:
-                                # Re-raise if not a dimension issue
-                                raise
+                    # End generation if we've reached a stopping condition
+                    if (g_idx > minlen) and (l_idx > 2) and next_token[0, 0] >= 2048:
+                        flag = False
+                        break
                         
-                        # Get logits for current channel
-                        try:
-                            valid_logits = logits[:, -1:, l_idx:l_idx+1, :]
-                        except IndexError:
-                            # FIX: Handle index error if logits dimension doesn't match channel count
-                            logger.warning(f"Logits shape {logits.shape} doesn't match expected channel index {l_idx}")
-                            valid_logits = logits[:, -1:, min(l_idx, logits.shape[2]-1):min(l_idx, logits.shape[2]-1)+1, :]
-                        
-                        # Sample audio token
-                        if g_len == pre_gen_len:
-                            # First frame
-                            next_token = sample_token_audio(
-                                valid_logits.float(),
-                                use_sampling,
-                                temp,
-                                top_k,
-                            )
-                        elif l_idx > 0 and g_len > minlen:
-                            # Middle frames
-                            next_token = sample_token_audio(
-                                valid_logits.float(),
-                                use_sampling,
-                                temp,
-                                top_k,
-                            )
-                        else:
-                            # Special case
-                            next_token = sample_token_audio_2048(
-                                valid_logits.float(),
-                                use_sampling,
-                                temp,
-                                top_k
-                            )
-                            
-                        # End generation if we've reached a stopping condition
-                        if (g_idx > minlen) and (l_idx > 2) and next_token[0, 0] >= 2048:
-                            flag = False
-                            break
-                            
-                        # Add token to audio sequence
-                        audio_seq.append(next_token.squeeze().item())
-                        prefix[:, l_idx+1, g_len] = next_token.squeeze()
-                        
-                    except Exception as e:
-                        # FIX: Handle errors in audio generation
-                        logger.warning(f"Error generating audio token for channel {l_idx}: {e}")
-                        
-                        # Create fallback token
-                        fallback_token = 1000 + (g_idx * 50 + l_idx * 10) % 1000
-                        audio_seq.append(fallback_token)
-                        prefix[:, l_idx+1, g_len] = fallback_token
+                    # Add token to audio sequence
+                    audio_seq.append(next_token.squeeze().item())
+                    prefix[:, l_idx+1, g_len] = next_token.squeeze()
                 
                 # End generation if we've reached a stopping condition
                 if not flag:
                     break
                     
-                # Add the generated audio frame
-                audio_seq_tensor = torch.tensor(audio_seq, device=device)
-                final_results.append(audio_seq_tensor)
-                
-            except Exception as e:
-                # FIX: Handle errors in the entire generation step
-                logger.error(f"Error in generation step {g_idx}: {e}")
-                
-                # Create fallback audio frame with patterned tokens
-                audio_seq = []
-                for l_idx in range(8):
-                    fallback_token = 1000 + (g_idx * 50 + l_idx * 10) % 1000
-                    audio_seq.append(fallback_token)
-                    
-                # Add the fallback frame
-                audio_seq_tensor = torch.tensor(audio_seq, device=device)
-                final_results.append(audio_seq_tensor)
-                
-                # Stop after a few fallback frames to avoid endless noise
-                if g_idx >= minlen + 10:
-                    break
+                # Add the generated audio frame - ensure it's a valid 8-channel frame
+                if len(audio_seq) == 8:
+                    audio_seq_tensor = torch.tensor(audio_seq, device=device)
+                    final_results.append(audio_seq_tensor)
+                else:
+                    logger.warning(f"Generated incomplete audio frame with {len(audio_seq)} channels")
         
         print(" done!")
             
         # Stack all frames
         if final_results:
+            # Stack as [frames, channels]
             final_results = torch.stack(final_results, dim=0).to(device)
             
-            # Apply post-processing
-            if task_name == 'TTS':
-                final_results = reverse_delay(final_results)
-            elif task_name == 'audio_only':
-                # Get prompt audio and add generated audio
-                prompt_audio = prefix[0, 1:, :pre_gen_len].transpose(0, 1)
-                final_results = torch.cat([prompt_audio, final_results.transpose(0, 1)], dim=-1)
-                
+            if args.debug_mode:
+                inspect_audio_tokens(final_results, "Raw generated tokens")
+                visualize_tokens_as_image(final_results, os.path.join(args.output_dir, "tokens_original.png"))
+            
+            # Apply REVERSE DELAY - key insight from experiments
+            final_results = apply_reverse_delay(final_results)
+            
+            if args.debug_mode:
+                inspect_audio_tokens(final_results, "After reverse delay")
+                visualize_tokens_as_image(final_results, os.path.join(args.output_dir, "tokens_reverse_delay.png"))
+            
+            # Ensure tokens are in valid range before detokenization
+            final_results = torch.clamp(final_results, 0, 2047)
+            
+            # Format for detokenizer: should be [8, seq_len]
+            if final_results.dim() == 2 and final_results.shape[1] == 8:
+                final_results = final_results.transpose(0, 1)
+            
+            if args.debug_mode:
+                inspect_audio_tokens(final_results, "Final tokens for detokenization")
+            
             return final_results
         else:
             logger.error("No audio frames were generated.")
@@ -625,15 +567,117 @@ def generate_speech(model, audio_tokenizer, input_seq, input_mask, task_name, ar
         traceback.print_exc()
         return None
 
+def safe_detokenize(tokenizer, tokens, max_audio_length=10000):
+    """
+    Safely detokenize audio tokens with proper dimension handling to match training pipeline.
+    
+    Args:
+        tokenizer: The MimiCodec tokenizer
+        tokens: Audio tokens tensor
+        max_audio_length: Maximum allowed audio length to prevent CUDA errors
+        
+    Returns:
+        Detokenized audio waveform or None if detokenization fails
+    """
+    try:
+        # Log original shape for debugging
+        logger.info(f"Detokenizing tokens with shape: {tokens.shape}")
+        
+        # Validate token range (MimiCodec expects tokens in range [0, 2047])
+        original_min = tokens.min().item()
+        original_max = tokens.max().item()
+        
+        if original_min < 0 or original_max >= 2048:
+            logger.warning(f"Tokens outside valid range: min={original_min}, max={original_max}")
+            tokens = torch.clamp(tokens, 0, 2047)
+            logger.info(f"Clipped to range: min={tokens.min().item()}, max={tokens.max().item()}")
+        
+        # Convert tokens to Long type (int64) for embedding lookup
+        tokens = tokens.long()
+        
+        # Ensure tokens are in the format expected by MimiCodec: [8, sequence_length]
+        if tokens.dim() == 2:
+            if tokens.shape[0] == 8:
+                # Already in correct format [8, seq_len]
+                pass
+            elif tokens.shape[1] == 8:
+                # Need to transpose from [seq_len, 8] to [8, seq_len]
+                tokens = tokens.transpose(0, 1)
+                logger.info(f"Transposed tokens to shape: {tokens.shape}")
+            else:
+                logger.error(f"Unexpected token shape: {tokens.shape}. Expected 8 streams.")
+                return None
+        elif tokens.dim() == 3:
+            # Handle 3D tensor (might be [batch=1, streams=8, seq_len] or [batch=1, seq_len, streams=8])
+            if tokens.shape[0] == 1 and tokens.shape[1] == 8:
+                tokens = tokens.squeeze(0)
+            elif tokens.shape[0] == 1 and tokens.shape[2] == 8:
+                tokens = tokens.squeeze(0).transpose(0, 1)
+            else:
+                logger.error(f"Unexpected 3D token shape: {tokens.shape}")
+                return None
+        
+        # Limit sequence length to prevent OOM errors
+        if tokens.shape[1] > max_audio_length:
+            logger.warning(f"Truncating long audio sequence from {tokens.shape[1]} to {max_audio_length}")
+            tokens = tokens[:, :max_audio_length]
+        
+        # Perform detokenization with error handling
+        try:
+            audio = tokenizer.detokenize(tokens)
+            logger.info(f"Successfully detokenized to audio with shape: {audio.shape}")
+            
+            # Normalize audio (preventing too loud or too quiet output)
+            audio = audio / (audio.abs().max() + 1e-8) * 0.9
+            
+        except RuntimeError as e:
+            # Fall back to CPU if CUDA memory issues
+            if "CUDA" in str(e):
+                logger.warning("CUDA error in detokenization. Falling back to CPU...")
+                cpu_tokens = tokens.detach().cpu()
+                cpu_tokenizer = tokenizer.cpu()
+                audio = cpu_tokenizer.detokenize(cpu_tokens)
+                # Normalize audio
+                audio = audio / (audio.abs().max() + 1e-8) * 0.9
+                tokenizer.to(tokens.device)  # Move tokenizer back
+            else:
+                raise
+        
+        return audio
+        
+    except Exception as e:
+        logger.error(f"Error during detokenization: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Return a simple beep tone as fallback
+        logger.warning("Generating fallback audio tone")
+        sample_rate = 24000  # Use default sample rate
+        duration = 1.0  # seconds
+        t = torch.arange(0, duration, 1.0/sample_rate)
+        # Generate a 440 Hz sine wave
+        audio = 0.5 * torch.sin(2 * torch.pi * 440 * t).unsqueeze(0)
+        return audio
+
 def main():
     """Main function"""
     # Parse arguments
     parser = get_parser()
     args = parser.parse_args()
     
+    # Set debug level if requested
+    if args.debug_mode:
+        logger.setLevel(logging.DEBUG)
+        logging.getLogger().setLevel(logging.DEBUG)
+        
     # Create output directory
     output_dir = os.path.expanduser(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
+    
+    # Set random seed for reproducibility
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
     
     # Load model
     model, audio_tokenizer, device, train_args, llm_tokenizer = load_model(args)
@@ -649,7 +693,7 @@ def main():
                 args=train_args,
                 train_jsons=[],
                 valid_jsons=[args.data_json],
-                delay_step=1,
+                delay_step=1,  # Match the delay step used in training
                 batch_scale=train_args.batch_scale,
                 minibatch_debug=train_args.minibatch_debug,
                 max_length=train_args.max_length,
@@ -722,6 +766,13 @@ def main():
                 audio_tokens = generate_speech(model, audio_tokenizer, input_seq, input_mask, 'TTS', args)
                 
                 if audio_tokens is not None:
+                    # Visualize tokens if in debug mode
+                    if args.debug_mode:
+                        visualize_tokens_as_image(
+                            audio_tokens, 
+                            output_file=os.path.join(output_dir, f"tokens_{count}.png")
+                        )
+                    
                     # Convert to audio and save
                     audio_output = safe_detokenize(audio_tokenizer, audio_tokens)
                     audio_output = audio_output.detach().cpu()
@@ -758,6 +809,13 @@ def main():
             # Make sure audio tokens are valid before detokenization
             logger.info(f"Audio tokens shape: {audio_tokens.shape}")
             logger.info(f"Audio tokens min: {audio_tokens.min().item()}, max: {audio_tokens.max().item()}")
+            
+            # Visualize tokens if in debug mode
+            if args.debug_mode:
+                visualize_tokens_as_image(
+                    audio_tokens, 
+                    output_file=os.path.join(output_dir, "tokens.png")
+                )
             
             # Convert to audio and save
             audio_output = safe_detokenize(audio_tokenizer, audio_tokens)

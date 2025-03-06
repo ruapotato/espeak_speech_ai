@@ -42,3 +42,4 @@ humanfriendly
 lightning
 typeguard==2.13.3
 litgpt
+hyperpyyaml

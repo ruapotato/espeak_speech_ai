@@ -249,7 +249,7 @@ if [ ${stage} -le 7 ] && [ ${stop_stage} -ge 7 ]; then
             --train_data_jsons $train_data_jsons \
             --valid_data_jsons $valid_data_jsons \
             --exp_dir $MODEL_DIR/$EXPERIMENT_NAME \
-            --n_epoch 15 \
+            --n_epoch 30 \
             --max_length $max_length \
             --batch_scale $batch_scale \
             --global_learning_rate 5e-4 \

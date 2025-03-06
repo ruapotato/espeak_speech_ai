@@ -101,7 +101,7 @@ litgpt download meta-llama/Llama-3.2-1B-Instruct
 Generate a synthetic speech dataset using eSpeak:
 
 ```bash
-python build_dataset_espeak.py --output_dir ./gutenberg_espeak_dataset_clean --target_hours 7.0 --voice "en-us+m3"
+python build_dataset_espeak.py --output_dir ./gutenberg_espeak_dataset_clean --target_hours 20.0 --voice "en-us+m3"
 ```
 
 Parameters:
@@ -114,7 +114,7 @@ If you encounter WAV file compatibility issues, use:
 bash ./fix_wav_files.sh
 ```
 
-### Step 2: Data Preprocessing (Implemented)
+### Step 2: Data Preprocessing (Implemented/Redoing)
 Process and tokenize the generated dataset using:
 ```bash
 cd RSTnet/MLLM_v2/egs/pretraining
