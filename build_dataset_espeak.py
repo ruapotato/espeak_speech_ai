@@ -1,25 +1,18 @@
 #!/usr/bin/env python3
-#python ./build_dataset_espeak_clean.py --output_dir ./gutenberg_espeak_dataset_clean --target_hours 7.0 --voice "en-us+m3"
+# Modified version of build_dataset_espeak.py to use Natural Questions dataset
+# Usage: python build_dataset_espeak.py --output_dir ./natural_questions_dataset --target_hours 2.0 --voice "en-us+m3"
+
 import os
 import subprocess
 import json
 import random
 import tqdm
 import argparse
-import re
-import requests
-import nltk
-from nltk.tokenize import sent_tokenize
 import time
 import shutil
 import wave
-
-def install_nltk_packages():
-    """Install required NLTK packages"""
-    try:
-        nltk.data.find('tokenizers/punkt')
-    except LookupError:
-        nltk.download('punkt')
+import requests
+from datasets import load_dataset
 
 def install_dependencies():
     """Install required dependencies"""
@@ -40,110 +33,44 @@ def install_dependencies():
         subprocess.run(["apt-get", "install", "-y", "ffmpeg"], check=True)
         print("ffmpeg installed successfully")
 
-def get_gutenberg_book(book_id):
-    """Download a book from Project Gutenberg by ID"""
-    url = f"https://www.gutenberg.org/files/{book_id}/{book_id}-0.txt"
+def get_response_from_ollama(prompt, model="llama3.2:1b", max_tokens=50):
+    """Get a response from Ollama API"""
     try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            return response.text
-        # Try alternative URL format
-        url = f"https://www.gutenberg.org/files/{book_id}/{book_id}.txt"
-        response = requests.get(url)
-        if response.status_code == 200:
-            return response.text
-        # Try another alternative
-        url = f"https://www.gutenberg.org/cache/epub/{book_id}/pg{book_id}.txt"
-        response = requests.get(url)
-        if response.status_code == 200:
-            return response.text
-        print(f"Failed to download book {book_id}, status code: {response.status_code}")
-        return None
-    except Exception as e:
-        print(f"Error downloading book {book_id}: {e}")
-        return None
-
-def clean_gutenberg_text(text):
-    """Clean the Gutenberg text, removing headers, footers, and chapter markers"""
-    # Find the start of the book (after the header)
-    start_markers = [
-        "*** START OF THIS PROJECT GUTENBERG EBOOK",
-        "*** START OF THE PROJECT GUTENBERG EBOOK",
-        "***START OF THE PROJECT GUTENBERG EBOOK",
-        "*END*THE SMALL PRINT"
-    ]
-    
-    start_idx = 0
-    for marker in start_markers:
-        if marker in text:
-            parts = text.split(marker, 1)
-            if len(parts) > 1:
-                text = parts[1]
-                break
-    
-    # Find the end of the book (before the footer)
-    end_markers = [
-        "*** END OF THIS PROJECT GUTENBERG EBOOK",
-        "*** END OF THE PROJECT GUTENBERG EBOOK",
-        "***END OF THE PROJECT GUTENBERG EBOOK",
-        "End of the Project Gutenberg EBook",
-        "End of Project Gutenberg's"
-    ]
-    
-    for marker in end_markers:
-        if marker in text:
-            parts = text.split(marker, 1)
-            if len(parts) > 1:
-                text = parts[0]
-                break
-    
-    # Remove chapter headings and other formatting
-    text = re.sub(r'\r', '', text)  # Remove carriage returns
-    text = re.sub(r'\n\n+', '\n\n', text)  # Normalize multiple newlines
-    
-    return text
-
-def extract_good_sentences(text, min_length=30, max_length=200):
-    """Extract well-formed sentences from text"""
-    sentences = sent_tokenize(text)
-    good_sentences = []
-    
-    for sentence in sentences:
-        # Clean up whitespace
-        sentence = re.sub(r'\s+', ' ', sentence).strip()
+        response = requests.post('http://localhost:11434/api/generate', 
+                               json={
+                                   'model': model,
+                                   'prompt': prompt,
+                                   'max_tokens': max_tokens
+                               })
         
-        # Check length and structure
-        if min_length <= len(sentence) <= max_length and sentence.endswith(('.', '?', '!')):
-            # Check for balanced quotes and parentheses
-            if sentence.count('"') % 2 == 0 and sentence.count('(') == sentence.count(')'):
-                # Avoid sentences with unusual formatting or specialized content
-                if not re.search(r'[^\w\s.,;:!?()"\'-]', sentence):
-                    good_sentences.append(sentence)
-    
-    return good_sentences
+        if response.status_code == 200:
+            # Parse the streaming response
+            full_text = ""
+            for line in response.text.strip().split('\n'):
+                if line:
+                    try:
+                        data = json.loads(line)
+                        if 'response' in data:
+                            full_text += data['response']
+                    except json.JSONDecodeError:
+                        pass
+            
+            return full_text.strip()
+        else:
+            print(f"Error from Ollama API: {response.status_code}")
+            return None
+            
+    except Exception as e:
+        print(f"Error connecting to Ollama: {e}")
+        return None
 
-def download_books(book_ids):
-    """Download and process multiple books"""
-    all_sentences = []
-    
-    for book_id in tqdm.tqdm(book_ids, desc="Downloading books"):
-        print(f"Downloading book {book_id}...")
-        text = get_gutenberg_book(book_id)
-        if text:
-            print(f"Cleaning text for book {book_id}...")
-            clean_text = clean_gutenberg_text(text)
-            print(f"Extracting sentences from book {book_id}...")
-            sentences = extract_good_sentences(clean_text)
-            print(f"Found {len(sentences)} good sentences in book {book_id}")
-            all_sentences.extend(sentences)
-            # Slight delay to avoid hammering the server
-            time.sleep(1)
-    
-    return all_sentences
-
+def extract_first_n_words(text, n=100):
+    """Extract the first n words from a text"""
+    words = text.split()
+    return " ".join(words[:n])
 
 def generate_clean_audio(text, output_path, voice="en-us", speed=150):
-    """Generate clean speech using espeak and ffmpeg to ensure compatibility with MimiCodec"""
+    """Generate clean speech using espeak and ffmpeg"""
     temp_path = output_path + ".temp.wav"
     
     try:
@@ -153,7 +80,7 @@ def generate_clean_audio(text, output_path, voice="en-us", speed=150):
             check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
         
-        # Convert to exact format required by MimiCodec
+        # Convert to exact format required
         subprocess.run([
             "ffmpeg", "-y", 
             "-i", temp_path,
@@ -207,6 +134,30 @@ def create_tar_info_scp_file(metadata, output_dir):
             f.write(f"{item['id']} {item['text']}\n")
     return tar_info_path
 
+def load_complex_web_questions(num_samples=5000):
+    """Load questions from the Complex Web Questions dataset"""
+    print("Loading Complex Web Questions dataset...")
+    
+    # We need to specify the config name 'complex_web_questions'
+    dataset = load_dataset("drt/complex_web_questions", "complex_web_questions", split="train")
+    print(f"Loaded {len(dataset)} examples from Complex Web Questions dataset")
+    
+    # Extract questions from the dataset
+    questions = []
+    for item in tqdm.tqdm(dataset, desc="Extracting questions"):
+        try:
+            question_text = item['question']
+            if isinstance(question_text, str) and len(question_text) > 5:
+                questions.append(question_text)
+        except (KeyError, TypeError):
+            continue
+    
+    print(f"Extracted {len(questions)} questions from Complex Web Questions dataset")
+    
+    # Shuffle and limit to num_samples
+    random.shuffle(questions)
+    return questions[:num_samples]
+
 def main(args):
     # Create directories
     os.makedirs(args.output_dir, exist_ok=True)
@@ -224,24 +175,16 @@ def main(args):
     
     # Make sure dependencies are installed
     install_dependencies()
-    install_nltk_packages()
     
-    # Define book IDs to download (classics with good public domain texts)
-    # 1342: Pride and Prejudice, 84: Frankenstein, 11: Alice in Wonderland,
-    # 1661: The Adventures of Sherlock Holmes, 1952: The Yellow Wallpaper
-    book_ids = args.book_ids if args.book_ids else [1342, 84, 11, 1661, 1952, 2701, 98, 1400, 345, 1080]
-    print("Will download and process these books:", book_ids)
+    # Load questions from Complex Web Questions dataset
+    questions = load_complex_web_questions(args.total_samples)
     
-    # Download and process books
-    all_sentences = download_books(book_ids)
-    random.shuffle(all_sentences)
+    print(f"Total questions collected: {len(questions)}")
     
-    print(f"Total sentences collected: {len(all_sentences)}")
-    
-    # Check if we have enough sentences
-    if len(all_sentences) < args.total_samples:
-        print(f"Warning: Only found {len(all_sentences)} sentences, fewer than requested {args.total_samples}")
-        args.total_samples = len(all_sentences)
+    # Check if we have enough questions
+    if len(questions) < args.total_samples:
+        print(f"Warning: Only found {len(questions)} questions, fewer than requested {args.total_samples}")
+        args.total_samples = len(questions)
     
     # Calculate train/val/test splits
     train_samples = int(args.total_samples * 0.8)
@@ -273,16 +216,28 @@ def main(args):
     target_hours = args.target_hours
     target_seconds = target_hours * 3600
     
-    sentences_used = 0
+    questions_used = 0
     voice = args.voice if args.voice else "en-us"
     
     # Generate training samples
     print("Generating training samples...")
-    for i, text in enumerate(tqdm.tqdm(all_sentences[:train_samples])):
-        sample_id = f"gutenberg_train_{i:06d}"
+    for i, question in enumerate(tqdm.tqdm(questions[:train_samples])):
+        # Get response from Ollama
+        response = get_response_from_ollama(question)
+        if not response:
+            print(f"Failed to get response for: {question}")
+            continue
+        
+        # Take first few words of response
+        first_words = extract_first_n_words(response, args.words_per_response)
+        if not first_words:
+            print(f"No words found in response for: {question}")
+            continue
+        
+        sample_id = f"nq_train_{i:06d}"
         output_path = os.path.join(audio_dir, f"{sample_id}.wav")
         
-        if generate_clean_audio(text, output_path, voice=voice, speed=args.speed):
+        if generate_clean_audio(first_words, output_path, voice=voice, speed=args.speed):
             # Get duration using ffprobe
             try:
                 result = subprocess.run(
@@ -296,36 +251,49 @@ def main(args):
                 total_duration += duration
             except:
                 # If ffprobe fails, estimate duration based on text length
-                duration = len(text) * 0.06  # rough estimate: 60ms per character
+                duration = len(first_words) * 0.06  # rough estimate: 60ms per character
                 total_duration += duration
             
             metadata["train"].append({
                 "id": sample_id,
-                "text": text
+                "text": question,
+                "response_start": first_words  # Store the text used for audio generation
             })
             
             audio_files["train"][sample_id] = output_path
-            sentences_used += 1
+            questions_used += 1
             successful_train += 1
             
             # Check if we've reached our target duration
             if total_duration >= target_seconds:
                 print(f"Reached target duration of {target_hours} hours ({total_duration/3600:.2f} hours)")
                 break
-    
-    # If we still need more audio, continue with validation and test samples
-    if total_duration < target_seconds and sentences_used < len(all_sentences):
-        remaining_sentences = all_sentences[sentences_used:]
-        val_test_split = int(len(remaining_sentences) * 0.5)
         
-        # Generate validation samples
-        val_sentences = remaining_sentences[:val_test_split]
-        print(f"Generating {len(val_sentences)} validation samples...")
-        for i, text in enumerate(tqdm.tqdm(val_sentences)):
-            sample_id = f"gutenberg_val_{i:06d}"
+        # Small delay to avoid hammering Ollama API
+        time.sleep(0.1)
+    
+    # If we still need more audio, continue with validation samples
+    if total_duration < target_seconds and questions_used < len(questions):
+        val_questions = questions[train_samples:train_samples+val_samples]
+        print(f"Generating {len(val_questions)} validation samples...")
+        
+        for i, question in enumerate(tqdm.tqdm(val_questions)):
+            # Get response from Ollama
+            response = get_response_from_ollama(question)
+            if not response:
+                print(f"Failed to get response for: {question}")
+                continue
+            
+            # Take first few words of response
+            first_words = extract_first_n_words(response, args.words_per_response)
+            if not first_words:
+                print(f"No words found in response for: {question}")
+                continue
+            
+            sample_id = f"nq_val_{i:06d}"
             output_path = os.path.join(audio_dir, f"{sample_id}.wav")
             
-            if generate_clean_audio(text, output_path, voice=voice, speed=args.speed):
+            if generate_clean_audio(first_words, output_path, voice=voice, speed=args.speed):
                 try:
                     result = subprocess.run(
                         ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", 
@@ -337,33 +305,49 @@ def main(args):
                     duration = float(result.stdout.strip())
                     total_duration += duration
                 except:
-                    duration = len(text) * 0.06
+                    duration = len(first_words) * 0.06
                     total_duration += duration
                 
                 metadata["val"].append({
                     "id": sample_id,
-                    "text": text
+                    "text": question,
+                    "response_start": first_words
                 })
                 
                 audio_files["val"][sample_id] = output_path
+                questions_used += 1
                 successful_val += 1
                 
                 # Check if we've reached our target duration
                 if total_duration >= target_seconds:
                     print(f"Reached target duration of {target_hours} hours ({total_duration/3600:.2f} hours)")
                     break
+            
+            # Small delay to avoid hammering Ollama API
+            time.sleep(0.1)
+    
+    # If we still need more audio, continue with test samples
+    if total_duration < target_seconds and questions_used < len(questions):
+        test_questions = questions[train_samples+val_samples:args.total_samples]
+        print(f"Generating {len(test_questions)} test samples...")
         
-        # Generate test samples
-        test_sentences = remaining_sentences[val_test_split:]
-        print(f"Generating {len(test_sentences)} test samples...")
-        for i, text in enumerate(tqdm.tqdm(test_sentences)):
-            if total_duration >= target_seconds:
-                break
-                
-            sample_id = f"gutenberg_test_{i:06d}"
+        for i, question in enumerate(tqdm.tqdm(test_questions)):
+            # Get response from Ollama
+            response = get_response_from_ollama(question)
+            if not response:
+                print(f"Failed to get response for: {question}")
+                continue
+            
+            # Take first few words of response
+            first_words = extract_first_n_words(response, args.words_per_response)
+            if not first_words:
+                print(f"No words found in response for: {question}")
+                continue
+            
+            sample_id = f"nq_test_{i:06d}"
             output_path = os.path.join(audio_dir, f"{sample_id}.wav")
             
-            if generate_clean_audio(text, output_path, voice=voice, speed=args.speed):
+            if generate_clean_audio(first_words, output_path, voice=voice, speed=args.speed):
                 try:
                     result = subprocess.run(
                         ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", 
@@ -375,21 +359,26 @@ def main(args):
                     duration = float(result.stdout.strip())
                     total_duration += duration
                 except:
-                    duration = len(text) * 0.06
+                    duration = len(first_words) * 0.06
                     total_duration += duration
                 
                 metadata["test"].append({
                     "id": sample_id,
-                    "text": text
+                    "text": question,
+                    "response_start": first_words
                 })
                 
                 audio_files["test"][sample_id] = output_path
+                questions_used += 1
                 successful_test += 1
                 
                 # Check if we've reached our target duration
                 if total_duration >= target_seconds:
                     print(f"Reached target duration of {target_hours} hours ({total_duration/3600:.2f} hours)")
                     break
+            
+            # Small delay to avoid hammering Ollama API
+            time.sleep(0.1)
     
     # Create tar.scp and tar_info.scp files
     create_tar_scp_file(audio_files["train"], train_dir)
@@ -444,25 +433,15 @@ def main(args):
     
     if total_duration/3600 < target_hours:
         print(f"WARNING: Collected {total_duration/3600:.2f} hours of audio, which is less than the target {target_hours} hours")
-        print("Consider adding more books or increasing the total_samples parameter")
-    
-    # Print instructions for using with RSTnet
-    print("\nInstructions for using with RSTnet:")
-    print("1. Update your extract_token.sh script to use the MimiCodec tokenizer:")
-    print("   --tokenizer mimi instead of --tokenizer ssl")
-    print(f"2. Set DATA_ROOT='{os.path.abspath(args.output_dir)}' in extract_token.sh")
-    print("3. Run extract_token.sh to process the dataset")
-    print("4. Run the training script with the processed dataset")
+        print("Consider increasing the total_samples parameter")
 
 if __name__ == "__main__":
-    import shutil
-    
-    parser = argparse.ArgumentParser(description="Generate clean synthetic speech dataset using espeak with Gutenberg books")
-    parser.add_argument("--output_dir", type=str, default="gutenberg_espeak_dataset_clean", 
+    parser = argparse.ArgumentParser(description="Generate speech dataset using Complex Web Questions and Ollama responses")
+    parser.add_argument("--output_dir", type=str, default="complex_web_questions_dataset", 
                         help="Directory to save the dataset")
-    parser.add_argument("--total_samples", type=int, default=20000, 
+    parser.add_argument("--total_samples", type=int, default=5000, 
                         help="Maximum number of samples to generate")
-    parser.add_argument("--target_hours", type=float, default=7.0, 
+    parser.add_argument("--target_hours", type=float, default=2.0, 
                         help="Target hours of audio to generate")
     parser.add_argument("--ngpu", type=int, default=1, 
                         help="Number of GPUs to split data for")
@@ -470,8 +449,8 @@ if __name__ == "__main__":
                         help="espeak voice to use (en-us+m3 for male voice)")
     parser.add_argument("--speed", type=int, default=150, 
                         help="Speech rate (words per minute)")
-    parser.add_argument("--book_ids", type=int, nargs="+",
-                        help="Specific Project Gutenberg book IDs to use")
+    parser.add_argument("--words_per_response", type=int, default=100,
+                        help="Number of words to take from each response")
     
     args = parser.parse_args()
     main(args)
