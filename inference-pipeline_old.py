@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Inference script for codebook decoder model
+Inference script for codebook mapper model
 
-This script loads a trained decoder model and uses it to generate audio from
+This script loads a trained mapper model and uses it to generate audio from
 zeroth codebook tokens. It can use GPU acceleration for inference.
 
 Usage:
-python inference-pipeline.py --model_path ./big_mapper_model/final_model.pt --input_file ./output/zeroth_codebook.txt --output_file output.wav --use_gpu
+python inference-dims.py --model_path ./big_mapper_model/best_model.pt --input_file ./output/zeroth_codebook.txt --output_file ./big_output.wav --temperature 0.05
 """
 
 import torch
@@ -21,86 +21,8 @@ import wave
 from tqdm import tqdm
 from transformers import MimiModel, AutoFeatureExtractor
 
-# Define CodebookDecoderModel here so we don't need to import from another file
-class CodebookDecoderModel(nn.Module):
-    def __init__(self, vocab_size=1024, embed_dim=256, hidden_dim=512, num_layers=2, num_codebooks=32):
-        super().__init__()
-        
-        self.vocab_size = vocab_size
-        self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
-        
-        # Simplify architecture for initial testing
-        self.lstm = nn.LSTM(
-            input_size=embed_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,  # Reduced number of layers
-            bidirectional=False,    # Remove bidirectional for simplicity
-            batch_first=True,
-            dropout=0.1
-        )
-        
-        self.output_layers = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Dropout(0.1),
-                nn.Linear(hidden_dim, vocab_size)
-            ) for _ in range(num_codebooks - 1)
-        ])
-    
-    def forward(self, input_ids, lengths=None):
-        batch_size = input_ids.size(0)
-        
-        # Input validation - ensure token indices are within vocab size
-        input_ids = torch.clamp(input_ids, 0, self.vocab_size - 1)
-        
-        # Embedding
-        embedded = self.embedding(input_ids)
-        
-        # Process through LSTM - no packing needed due to bucketing
-        lstm_output, _ = self.lstm(embedded)
-        
-        # Generate predictions
-        predictions = []
-        for layer in self.output_layers:
-            pred = layer(lstm_output)
-            predictions.append(pred)
-        
-        return torch.stack(predictions, dim=1)
-    
-    def predict(self, input_ids, temperature=1.0):
-        """Generate predictions for inference"""
-        with torch.no_grad():
-            # Input validation
-            input_ids = torch.clamp(input_ids, 0, self.vocab_size - 1)
-            
-            # Get logits for each codebook
-            outputs = self(input_ids)  # [batch, num_codebooks-1, seq_len, vocab_size]
-            
-            # Generate samples for each codebook
-            predictions = []
-            for i in range(outputs.shape[1]):
-                # Apply temperature
-                if temperature != 1.0:
-                    logits = outputs[:, i] / temperature
-                else:
-                    logits = outputs[:, i]
-                
-                # Convert to probabilities
-                probs = F.softmax(logits, dim=-1)
-                
-                # Sample from distribution
-                sampled = torch.multinomial(
-                    probs.reshape(-1, self.vocab_size),
-                    num_samples=1
-                ).reshape(input_ids.shape)
-                
-                predictions.append(sampled)
-            
-            # Stack all codebooks (including zeroth)
-            all_codebooks = torch.stack([input_ids] + predictions, dim=1)
-            
-            return all_codebooks
+# Import the model architecture
+from fixed_vocab_model_module import SimpleMapper
 
 def setup_logging(verbosity=2):
     """Set up logging with specified verbosity level"""
@@ -123,36 +45,33 @@ def get_model_dimensions(checkpoint):
     # Get embedding weight to determine embed_dim
     embed_dim = checkpoint["model_state_dict"]["embedding.weight"].shape[1]
     
-    # Get hidden dimension from the LSTM
-    hidden_dim = checkpoint["model_state_dict"]["lstm.weight_ih_l0"].shape[0] // 4
+    # Get hidden dimension from the MLP
+    hidden_dim = checkpoint["model_state_dict"]["mlp.0.bias"].shape[0]
     
-    # Get number of codebooks from the output layers
-    num_output_layers = len([k for k in checkpoint["model_state_dict"].keys() if k.startswith("output_layers.")])
-    num_codebooks = num_output_layers // 4 + 1  # Each output layer has 4 parameter tensors + 1 for zeroth codebook
-    
-    return embed_dim, hidden_dim, num_codebooks
+    return embed_dim, hidden_dim
 
 def load_model(model_path, device='cpu'):
-    """Load the trained decoder model"""
+    """Load the trained mapper model"""
     logger = logging.getLogger("inference")
     logger.info(f"Loading model from {model_path}")
     
     checkpoint = torch.load(model_path, map_location=device)
     
-    # Get vocabulary size from checkpoint or default to 2048
+    # Get parameters from checkpoint
     vocab_size = checkpoint.get("vocab_size", 2048)
+    num_codebooks = checkpoint.get("num_codebooks", 32)
     
     # Extract dimensions from checkpoint
-    embed_dim, hidden_dim, num_codebooks = get_model_dimensions(checkpoint)
+    embed_dim, hidden_dim = get_model_dimensions(checkpoint)
     logger.info(f"Model parameters: vocab_size={vocab_size}, num_codebooks={num_codebooks}")
     logger.info(f"Model dimensions: embed_dim={embed_dim}, hidden_dim={hidden_dim}")
     
     # Create model with correct dimensions
-    model = CodebookDecoderModel(
+    model = SimpleMapper(
         vocab_size=vocab_size,
+        num_codebooks=num_codebooks,
         embed_dim=embed_dim,
-        hidden_dim=hidden_dim,
-        num_codebooks=num_codebooks
+        hidden_dim=hidden_dim
     )
     
     # Load weights
@@ -230,10 +149,10 @@ def save_audio(audio_data, sample_rate, output_file):
         wf.writeframes(audio_int16.tobytes())
 
 def main():
-    parser = argparse.ArgumentParser(description="Run inference with codebook decoder model")
+    parser = argparse.ArgumentParser(description="Run inference with codebook mapper model")
     
     # Input/output arguments
-    parser.add_argument("--model_path", type=str, default="./big_mapper_model/final_model.pt",
+    parser.add_argument("--model_path", type=str, default="./big_mapper_model/best_model.pt",
                       help="Path to trained model checkpoint")
     parser.add_argument("--input_file", type=str, required=True,
                       help="File containing zeroth codebook tokens")
@@ -264,7 +183,7 @@ def main():
         logger.info("Using CPU for inference")
     
     # Load mapper model
-    decoder_model, num_codebooks = load_model(args.model_path, device=device)
+    mapper_model, num_codebooks = load_model(args.model_path, device=device)
     
     # Load zeroth codebook
     zeroth_tokens = load_zeroth_codebook(args.input_file)
@@ -291,7 +210,7 @@ def main():
             
             # Generate all codebooks
             with torch.no_grad():
-                all_codebooks = decoder_model.predict(chunk, temperature=args.temperature)
+                all_codebooks = mapper_model.predict(chunk, temperature=args.temperature)
             
             # Generate audio for this chunk
             chunk_audio = create_audio(all_codebooks, mimi_model, feature_extractor, device)
@@ -303,7 +222,7 @@ def main():
         # Process all at once
         # Generate all codebooks
         with torch.no_grad():
-            all_codebooks = decoder_model.predict(zeroth_tensor, temperature=args.temperature)
+            all_codebooks = mapper_model.predict(zeroth_tensor, temperature=args.temperature)
         
         # Generate audio
         audio_data = create_audio(all_codebooks, mimi_model, feature_extractor, device)

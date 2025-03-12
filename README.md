@@ -62,13 +62,14 @@ python codebook-dataset-generator.py --input_dir ./gutenberg_espeak_dataset_clea
 
 # CPU based
 python codebook-decoder-model_old.py --data_dir ./codebook_dataset --output_dir ./big_mapper_model --embed_dim 256 --hidden_dim 512 --epochs 3
+Use inference-pipeline_old.py if trained this way
 
 # GPU based
-python codebook-decoder-model.py --data_dir ./codebook_dataset --output_dir ./big_mapper_model --embed_dim 256 --hidden_dim 512 --epochs 5
+python codebook-decoder-model.py --data_dir ./codebook_dataset --output_dir ./big_mapper_model --embed_dim 256 --hidden_dim 512 --epochs 20 --batch_size 32
 
 # Test output.wav sounds like gutenberg_train_000002.wav
 python codebook-zero-decoder.py --input_file ./gutenberg_espeak_dataset_clean/audio/gutenberg_train_000002.wav --output_dir ./output --save_codebooks
-python inference-pipeline.py --model_path ./big_mapper_model/final_model.pt --input_file ./output/zeroth_codebook.txt --output_file output.wav --use_gpu
+python inference-pipeline.py --model_path ./big_mapper_model/checkpoint_epoch_19.pt --input_file ./output/zeroth_codebook.txt --output_file output.wav --use_gpu
 
 
 # pull model to finetune
