@@ -18,6 +18,7 @@ import json
 import argparse
 import logging
 import wave
+import re
 from tqdm import tqdm
 from transformers import MimiModel, AutoFeatureExtractor
 
@@ -172,7 +173,31 @@ def load_zeroth_codebook(input_file):
     logger.info(f"Loading zeroth codebook from {input_file}")
     
     with open(input_file, 'r') as f:
-        tokens = list(map(int, f.read().strip().split()))
+        content = f.read().strip()
+    
+    # Check if we have the indexed format (e.g., "0:1673 1:563 2:396...")
+    if re.search(r'\d+:\d+', content):
+        logger.info("Detected indexed token format")
+        # Parse the indexed format, extracting just the token values
+        tokens = []
+        for item in content.split():
+            parts = item.split(':')
+            if len(parts) == 2:
+                try:
+                    tokens.append(int(parts[1]))
+                except ValueError:
+                    logger.warning(f"Could not parse token: {item}")
+            else:
+                logger.warning(f"Unexpected token format: {item}")
+    else:
+        logger.info("Detected plain token format")
+        # Simple space-separated integers
+        tokens = []
+        for item in content.split():
+            try:
+                tokens.append(int(item))
+            except ValueError:
+                logger.warning(f"Could not parse token: {item}")
     
     logger.info(f"Loaded {len(tokens)} tokens")
     return tokens

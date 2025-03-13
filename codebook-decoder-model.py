@@ -175,7 +175,7 @@ def safe_collate_fn(batch):
     }
 
 class CodebookDecoderModel(nn.Module):
-    def __init__(self, vocab_size=1024, embed_dim=256, hidden_dim=512, num_layers=2, num_codebooks=4):
+    def __init__(self, vocab_size=1024, embed_dim=256, hidden_dim=512, num_layers=2, num_codebooks=32):
         super().__init__()
         
         self.vocab_size = vocab_size

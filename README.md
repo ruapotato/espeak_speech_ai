@@ -58,29 +58,30 @@ python build_dataset_espeak.py \
   --voice "en-us+m3" \
 
 # Build dataset for decoder model
-python codebook-dataset-generator.py --input_dir ./gutenberg_espeak_dataset_clean/audio --output_dir ./codebook_dataset
+python codebook-dataset-generator.py --input_dir ./complex_web_questions_dataset/audio --output_dir ./codebook_dataset
 
 # CPU based
 python codebook-decoder-model_old.py --data_dir ./codebook_dataset --output_dir ./big_mapper_model --embed_dim 256 --hidden_dim 512 --epochs 3
 Use inference-pipeline_old.py if trained this way
 
 # GPU based
-python codebook-decoder-model.py --data_dir ./codebook_dataset --output_dir ./big_mapper_model --embed_dim 256 --hidden_dim 512 --epochs 20 --batch_size 32
+python codebook-decoder-model.py --data_dir ./codebook_dataset --output_dir ./mapper_model --epochs 30
 
 # Test output.wav sounds like gutenberg_train_000002.wav
-python codebook-zero-decoder.py --input_file ./gutenberg_espeak_dataset_clean/audio/gutenberg_train_000002.wav --output_dir ./output --save_codebooks
-python inference-pipeline.py --model_path ./big_mapper_model/checkpoint_epoch_19.pt --input_file ./output/zeroth_codebook.txt --output_file output.wav --use_gpu
+python codebook-zero-decoder.py --input_file ./complex_web_questions_dataset/audio/*_000002.wav --output_dir ./output --save_codebooks
+python inference-pipeline.py --model_path ./mapper_model/checkpoint_epoch_3.pt --input_file ./output/zeroth_codebook.txt --output_file output.wav --use_gpu
 
 
 # pull model to finetune
 litgpt download Qwen/Qwen2.5-0.5B-Instruct
 
 
-# TODO update to only train on 0th codebook
-#python tokenizer.py --analyze --metadata_path ./complex_web_questions_dataset/metadata.json --audio_dir ./complex_web_questions_dataset/audio
+# token-ify the data
 python tokenizer.py --metadata_path ./complex_web_questions_dataset/metadata.json --audio_dir ./complex_web_questions_dataset/audio
+# finetune Qwen
 bash ./train.sh
-generate ./audio_lm_model/final --prompt "Generate speech audio for the following text.\n\nInput: Test.\n\nOutput:" --max_new_tokens 2000 --temperature 0.8
+
+litgpt generate ./audio_lm_model/final --prompt "Generate speech audio for the following text: \"tell me a joke.\"" --max_new_tokens 2000 --temperature 0.1
 bash ./inference.sh "Say 'potato'" test.wav
 
 
