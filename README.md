@@ -73,15 +73,21 @@ python inference-pipeline.py --model_path ./mapper_model/checkpoint_epoch_3.pt -
 
 
 # pull model to finetune
-litgpt download Qwen/Qwen2.5-0.5B-Instruct
+litgpt download meta-llama/Llama-3.2-1B-Instruct
 
 
 # token-ify the data
 python tokenizer.py --metadata_path ./complex_web_questions_dataset/metadata.json --audio_dir ./complex_web_questions_dataset/audio
-# finetune Qwen
+
+# finetune
 bash ./train.sh
 
-litgpt generate ./audio_lm_model/final --prompt "Generate speech audio for the following text: \"tell me a joke.\"" --max_new_tokens 2000 --temperature 0.1
+# Test
+litgpt generate ./audio_lm_model/final --prompt "Generate speech audio for the following text: \"tell me a joke.\"" --max_new_tokens 2000 --temperature 0.9
+Copy output to ./text.txt
+python inference-pipeline.py --model_path ./mapper_model/checkpoint_epoch_4.pt --input_file ./test.txt --output_file output.wav --use_gpu
+
+# Run
 bash ./inference.sh "Say 'potato'" test.wav
 
 
